@@ -27,6 +27,10 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PICTURE_RE = re.compile(r"<Picture\s+(\d+)>")
 NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 AUTH = os.environ.get("COLAB_AUTH", "oauth2")
+INFERENCE_MODES = {"reference", "first_frame"}
+DEFAULT_WIDTH = 1344
+DEFAULT_HEIGHT = 768
+MAX_PIXELS = DEFAULT_WIDTH * DEFAULT_HEIGHT
 
 
 class ColabCommandError(RuntimeError):
@@ -224,6 +228,16 @@ def safe_name(value: Any, fallback: str) -> str:
     return candidate or fallback
 
 
+def validate_dimensions(width: Any, height: Any, *, label: str = "Video") -> tuple[int, int]:
+    if isinstance(width, bool) or not isinstance(width, int) or width <= 0 or width % 32:
+        raise ValueError(f"{label} width must be a positive integer divisible by 32.")
+    if isinstance(height, bool) or not isinstance(height, int) or height <= 0 or height % 32:
+        raise ValueError(f"{label} height must be a positive integer divisible by 32.")
+    if width * height > MAX_PIXELS:
+        raise ValueError(f"{label} dimensions may not exceed {MAX_PIXELS:,} pixels (1344×768).")
+    return width, height
+
+
 def shot_timestamp(seconds: float) -> str:
     milliseconds = round(seconds * 1000)
     minutes, remainder = divmod(milliseconds, 60_000)
@@ -334,6 +348,14 @@ def resolve_jobs(manifest: dict[str, Any], output_dir: Path) -> list[dict[str, A
         refs = raw.get("reference_images", raw.get("images"))
         if not isinstance(refs, list) or not 1 <= len(refs) <= 9:
             raise ValueError(f"Job {index} must have 1–9 reference images.")
+        inference_mode = raw.get("inference_mode", "reference")
+        if not isinstance(inference_mode, str) or inference_mode not in INFERENCE_MODES:
+            raise ValueError(f"Job {index} inference_mode must be 'reference' or 'first_frame'.")
+        if inference_mode == "first_frame" and len(refs) != 1:
+            raise ValueError(f"Job {index} first_frame mode requires exactly one reference image.")
+        width, height = validate_dimensions(
+            raw.get("width", DEFAULT_WIDTH), raw.get("height", DEFAULT_HEIGHT), label=f"Job {index}"
+        )
         image_paths: list[Path] = []
         for image in refs:
             path = Path(str(image)).expanduser().resolve()
@@ -376,6 +398,9 @@ def resolve_jobs(manifest: dict[str, Any], output_dir: Path) -> list[dict[str, A
             "title": str(raw.get("title") or f"Video {index}")[:120],
             "prompt": prompt,
             "reference_images": image_paths,
+            "inference_mode": inference_mode,
+            "width": width,
+            "height": height,
             "duration_seconds": duration,
             "seed": seed,
             "output_path": output,
@@ -488,8 +513,9 @@ def run_batch(
             notebook_copy = job_notebook_dir / "MiniMax_H3_Turbo_Colab.ipynb"
             shutil.copy2(NOTEBOOK, notebook_copy)
             env_values = [
-                "H3_INFERENCE_MODE=reference",
-                "H3_REFERENCE_IMAGES=" + json.dumps(remote_refs, separators=(",", ":")),
+                "H3_INFERENCE_MODE=" + job["inference_mode"],
+                "H3_WIDTH=" + str(job["width"]),
+                "H3_HEIGHT=" + str(job["height"]),
                 "H3_PROMPT_FILE=" + remote_prompt,
                 "H3_DURATION_SECONDS=" + str(job["duration_seconds"]),
                 "H3_SEED=" + str(job["seed"]),
@@ -497,6 +523,10 @@ def run_batch(
                 "H3_OUTPUT_PATH=" + remote_output,
                 "H3_JOB_TIMEOUT_SECONDS=" + str(min(exec_timeout, 7200)),
             ]
+            if job["inference_mode"] == "reference":
+                env_values.append("H3_REFERENCE_IMAGES=" + json.dumps(remote_refs, separators=(",", ":")))
+            else:
+                env_values.append("H3_INPUT_IMAGE=" + remote_refs[0])
             exec_args = ["exec", "--session", session, "--timeout", str(exec_timeout)]
             for value in env_values:
                 exec_args.extend(["--env", value])
@@ -601,6 +631,9 @@ def main() -> int:
     single_parser.add_argument("--image", "-i", action="append", required=True)
     single_parser.add_argument("--prompt", "-p", required=True)
     single_parser.add_argument("--output", "-o")
+    single_parser.add_argument("--mode", choices=sorted(INFERENCE_MODES), default="reference")
+    single_parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    single_parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     single_parser.add_argument("--gpu", default=os.environ.get("COLAB_GPU", "A100"))
     single_parser.add_argument("--no-high-mem", action="store_true")
     single_parser.add_argument("--timeout", type=float, default=float(os.environ.get("COLAB_EXEC_TIMEOUT", "3600")))
@@ -634,6 +667,9 @@ def main() -> int:
                     "title": output.stem,
                     "prompt_file": str(Path(args.prompt).expanduser().resolve()),
                     "reference_images": args.image,
+                    "inference_mode": args.mode,
+                    "width": args.width,
+                    "height": args.height,
                     "duration_seconds": float(os.environ.get("H3_DURATION_SECONDS", "12")),
                     "output_path": str(output),
                 }]

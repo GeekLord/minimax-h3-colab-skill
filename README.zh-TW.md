@@ -1,6 +1,6 @@
 # MiniMax H3 Colab 技能
 
-這是一個完整、可獨立使用的 Codex 技能儲存庫，能將本機參照圖片交給 Google Colab，製作短篇 MiniMax H3 Ref2VA 影片。使用者可以直接 clone、安裝技能、完成 Colab CLI 登入，再使用內附的 runner 或 Shell 啟動器。儲存庫包含：
+這是一個完整、可獨立使用的 Codex 技能儲存庫，能將本機圖片交給 Google Colab，製作短篇 MiniMax H3 FL2VA 首幀影片或 Ref2VA 多參照影片。使用者可以直接 clone、安裝技能、完成 Colab CLI 登入，再使用內附的 runner 或 Shell 啟動器。儲存庫包含：
 
 - `SKILL.md`：Codex 選用此技能時讀取的指示；
 - `scripts/runner.py`：管理 session、查詢用量、上傳檔案、批次執行、下載與清理的 runner；
@@ -91,10 +91,14 @@ runner 會把 `--auth="$COLAB_AUTH"` 傳給每一個 Colab 指令；預設值是
   --image /absolute/path/reference_1.png \
   --image /absolute/path/reference_2.jpg \
   --prompt /absolute/path/prompt.txt \
+  --mode reference \
+  --width 1344 --height 768 \
   --output /absolute/path/intro.mp4
 ```
 
-第一張圖片會在 Notebook 中對應 `<Picture 1>`，第二張對應 `<Picture 2>`，依此類推。每次傳入 1–9 張非空白圖片。prompt 檔案必須是非空白 UTF-8 文字，並會原封不動上傳。如果省略 `--output`，MP4 會存到第一張參照圖片旁邊，檔名加上 `_minimax_h3.mp4`。
+`--mode` 預設為 `reference`，可改為 `first_frame`。首幀模式必須只提供一張圖片；它會以 FL2VA 首幀條件生成。批次 manifest 每個工作可設定 `inference_mode`、`width` 和 `height`，省略時分別使用 `reference`、1344 和 768。
+
+在 `reference` 模式中，第一張圖片對應 `<Picture 1>`，第二張對應 `<Picture 2>`，依此類推；`first_frame` 模式只接受一張首幀圖。圖片必須非空白，prompt 檔案必須是非空白 UTF-8 文字，並會原封不動上傳。如果省略 `--output`，MP4 會存到第一張圖片旁邊，檔名加上 `_minimax_h3.mp4`。
 
 預設影片長度是 12 秒；可用 `H3_DURATION_SECONDS` 設為 4–15 秒：
 
@@ -115,6 +119,8 @@ Shell 啟動器預設要求 A100 高記憶體 runtime。以下環境變數可以
 | `COLAB_SESSION_NAME` | 自動產生 | runner 建立的可重用 session 名稱 |
 | `H3_DURATION_SECONDS` | `12` | 影片長度，範圍 4–15 秒 |
 
+輸出寬高必須是 32 的正整數倍，總像素不可超過 1344×768。首幀與參照圖片都不會自動對應成任意時間點的 keyframe。
+
 ## 批次推論
 
 要製作多支影片，請把所有工作放在同一份 manifest，讓它們共用一個 Colab session 與已載入的模型。`jobs.json` 範例：
@@ -125,6 +131,9 @@ Shell 啟動器預設要求 A100 高記憶體 runtime。以下環境變數可以
     {
       "id": "intro",
       "title": "Presenter introduction",
+      "inference_mode": "reference",
+      "width": 1344,
+      "height": 768,
       "reference_images": [
         "/absolute/path/girl-front.png",
         "/absolute/path/girl-side.png"
@@ -136,8 +145,11 @@ Shell 啟動器預設要求 A100 高記憶體 runtime。以下環境變數可以
     {
       "id": "demo",
       "title": "CLI demo",
+      "inference_mode": "first_frame",
+      "width": 512,
+      "height": 512,
       "reference_images": ["/absolute/path/girl-front.png"],
-      "prompt": "A concise Ref2VA prompt referring to <Picture 1>.",
+      "prompt": "A concise FL2VA prompt describing motion from the supplied first frame.",
       "duration_seconds": 12,
       "output_name": "demo"
     }
@@ -156,7 +168,7 @@ python3 scripts/runner.py batch \
   --progress /absolute/path/outputs/progress.json
 ```
 
-runner 會在建立 session 前驗證所有本機輸入，逐工作上傳圖片與 prompt、執行 Notebook、下載並驗證 MP4，再處理下一項。後續工作失敗時，已完成的輸出仍會保留。由批次建立的 session 在清理階段會停止，即使中途發生錯誤或逾時也會嘗試停止。若用 `--session NAME` 重用既有 session，想在佇列完成後停止它時，請加上 `--stop-on-complete`。
+runner 會在建立 session 前驗證所有本機輸入、模式、圖片數與尺寸，逐工作上傳圖片與 prompt、執行 Notebook、下載並驗證 MP4，再處理下一項。後續工作失敗時，已完成的輸出仍會保留。由批次建立的 session 在清理階段會停止，即使中途發生錯誤或逾時也會嘗試停止。若用 `--session NAME` 重用既有 session，想在佇列完成後停止它時，請加上 `--stop-on-complete`。
 
 也可以直接執行已安裝技能中的 runner，不需要留在 clone 下來的儲存庫：
 
@@ -179,7 +191,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/minimax-h3-colab/scripts/runner.py" 
 
 ## 直接使用 Notebook
 
-`assets/MiniMax_H3_Turbo_Colab.ipynb` 就是 runner 上傳並執行的 Notebook，也可以手動在 Colab 開啟來檢查或除錯。runner 透過環境變數選擇 reference mode、遠端圖片路徑、prompt 路徑、影片長度、seed、輸出路徑與執行逾時。請讓本儲存庫中的 Notebook 與 runner 一起維護，以保持相容。
+`assets/MiniMax_H3_Turbo_Colab.ipynb` 就是 runner 上傳並執行的 Notebook，也可以手動在 Colab 開啟來檢查或除錯。Notebook 網頁模式預設使用 FL2VA 首幀；runner 會透過環境變數選擇每個工作使用的模式、遠端圖片路徑、尺寸、prompt 路徑、影片長度、seed、輸出路徑與執行逾時。請讓本儲存庫中的 Notebook 與 runner 一起維護，以保持相容。
 
 ## 疑難排解
 
