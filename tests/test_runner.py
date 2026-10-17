@@ -56,6 +56,9 @@ elif command == "exec":
         input_image=values.get("H3_INPUT_IMAGE"), prompt=values["H3_PROMPT_FILE"],
         width=values.get("H3_WIDTH"), height=values.get("H3_HEIGHT"),
     )
+    if os.environ.get("FAKE_LONG_LOG"):
+        print(os.environ["FAKE_LONG_LOG"])
+        print("Prompt leak <Picture 1> should be filtered")
     if values.get("H3_OUTPUT_PREFIX") == os.environ.get("FAKE_FAIL_PREFIX"):
         print("simulated inference failure", file=sys.stderr)
         sys.exit(7)
@@ -352,6 +355,35 @@ class RunnerTests(unittest.TestCase):
         for width, height in (("1376", "768"), ("513", "512")):
             with self.subTest(width=width, height=height), self.assertRaises(AssertionError):
                 execute_config(width, height)
+
+    def test_log_line_truncates_long_diagnostics_while_filtering_prompt_markers(self) -> None:
+        manifest = self.manifest(1)
+        state_path = self.root / "progress.json"
+        long_Diagnostic = "AssertionError: Free disk GiB below threshold: " + ("x" * 350)
+        with patch.dict(os.environ, {"FAKE_LONG_LOG": long_Diagnostic}):
+            runner.run_batch(
+                manifest, session=None, gpu="A100", high_mem=False, stop_on_complete=False,
+                progress_path=state_path, output_dir=self.root / "outputs", exec_timeout=100,
+            )
+        progress = json.loads(state_path.read_text(encoding="utf-8"))
+        truncated = [line for line in progress["log_tail"] if line.startswith("AssertionError:")]
+        self.assertEqual(len(truncated), 1)
+        self.assertEqual(len(truncated[0]), 320)
+        self.assertTrue(truncated[0].endswith("..."))
+        self.assertFalse(any("<Picture" in line for line in progress["log_tail"]))
+
+    def test_install_script_defaults_to_dot_codex_skills_when_codex_home_unset(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        fake_home = self.root / "home"
+        fake_home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "CODEX_HOME"}
+        env["HOME"] = str(fake_home)
+        subprocess.run(
+            [str(project / "install.sh")],
+            env=env, capture_output=True, text=True, check=True, timeout=30,
+        )
+        self.assertTrue((fake_home / ".codex" / "skills" / "minimax-h3-colab" / "SKILL.md").is_file())
+        self.assertFalse((fake_home / "skills").exists())
 
 
 if __name__ == "__main__":

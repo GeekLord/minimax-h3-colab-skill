@@ -48,9 +48,12 @@ while (($#)); do
 done
 
 if [[ -z "$SKILLS_ROOT" ]]; then
-  CODEX_ROOT="${CODEX_HOME:-${HOME:-}}"
-  [[ -n "$CODEX_ROOT" ]] || { echo "Set CODEX_HOME or HOME before installing the skill." >&2; exit 2; }
-  SKILLS_ROOT="$CODEX_ROOT/skills"
+  if [[ -n "${CODEX_HOME:-}" ]]; then
+    SKILLS_ROOT="$CODEX_HOME/skills"
+  else
+    [[ -n "${HOME:-}" ]] || { echo "Set CODEX_HOME or HOME before installing the skill." >&2; exit 2; }
+    SKILLS_ROOT="$HOME/.codex/skills"
+  fi
 fi
 
 SKILLS_ROOT="$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$SKILLS_ROOT")"

@@ -463,8 +463,10 @@ def run_batch(
 
     def log_line(line: str) -> None:
         # Avoid copying full prompt text into logs/state files.
-        if not line or len(line) > 320 or "<Picture" in line or "<Subject" in line or "[Chinese]" in line:
+        if not line or "<Picture" in line or "<Subject" in line or "[Chinese]" in line:
             return
+        if len(line) > 320:
+            line = line[:317] + "..."
         progress["log_tail"] = (progress["log_tail"] + [line])[-30:]
         progress["updated_at"] = now_iso()
         write_progress(progress_path, progress)

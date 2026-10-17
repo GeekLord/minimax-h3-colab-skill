@@ -46,6 +46,8 @@ For a single FL2VA clip, pass `--mode first_frame` and one `--image` to `scripts
 
 Use `--no-high-mem` when high-memory allocation is unavailable or not desired. For a named existing session, add `--session SESSION --stop-on-complete` if the requested workflow should end that session.
 
+On Windows hosts, run the Colab CLI and this runner inside WSL, where the CLI is installed and authenticated.
+
 ## Operational limits
 
 - Each job requires 1–9 non-empty images, a non-empty UTF-8 prompt, and a duration from 4–15 seconds. `first_frame` requires exactly one image.
