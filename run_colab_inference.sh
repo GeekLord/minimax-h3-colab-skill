@@ -3,14 +3,17 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: run_colab_inference.sh --image IMAGE [--image IMAGE ...] --prompt PROMPT.txt [--output OUTPUT.mp4]
+Usage: run_colab_inference.sh --image IMAGE [--image IMAGE ...] --prompt PROMPT.txt [--mode reference|first_frame] [--output OUTPUT.mp4]
 
-Run one MiniMax H3 Ref2VA inference on Colab. Repeat --image to provide 1–9
-ordered local reference images; the local UTF-8 prompt file is sent verbatim.
+Run one MiniMax H3 video inference on Colab. Ref2VA accepts 1–9 ordered
+reference images; first_frame mode requires exactly one local image.
 
 Options:
   -i, --image PATH    Local reference image (required; repeat 1–9 times)
   -p, --prompt PATH   Local UTF-8 prompt text file (required)
+      --mode MODE     reference (default) or first_frame
+      --width PIXELS   Output width (default: 1344; multiple of 32)
+      --height PIXELS  Output height (default: 768; multiple of 32)
   -o, --output PATH   Output MP4 path (default: next to the first image)
   -h, --help          Show this help
 
@@ -24,6 +27,7 @@ Environment overrides:
 
 Prompt image tags follow supplied order: first --image is <Picture 1>,
 second --image is <Picture 2>, and so on.
+The output area may not exceed 1344×768 pixels.
 EOF
 }
 
@@ -32,6 +36,9 @@ RUNNER="$SCRIPT_DIR/scripts/runner.py"
 INPUT_IMAGES=()
 PROMPT_FILE=""
 OUTPUT_TARGET=""
+INFERENCE_MODE="reference"
+WIDTH="1344"
+HEIGHT="768"
 
 while (($#)); do
   case "$1" in
@@ -48,6 +55,21 @@ while (($#)); do
     -o|--output)
       (($# >= 2)) || { echo "Missing path after $1" >&2; usage >&2; exit 2; }
       OUTPUT_TARGET="$2"
+      shift 2
+      ;;
+    --mode)
+      (($# >= 2)) || { echo "Missing mode after $1" >&2; usage >&2; exit 2; }
+      INFERENCE_MODE="$2"
+      shift 2
+      ;;
+    --width)
+      (($# >= 2)) || { echo "Missing width after $1" >&2; usage >&2; exit 2; }
+      WIDTH="$2"
+      shift 2
+      ;;
+    --height)
+      (($# >= 2)) || { echo "Missing height after $1" >&2; usage >&2; exit 2; }
+      HEIGHT="$2"
       shift 2
       ;;
     -h|--help)
@@ -86,7 +108,7 @@ EXEC_TIMEOUT="${COLAB_EXEC_TIMEOUT:-3600}"
 
 ARGS=(single)
 for input_path in "${INPUT_IMAGES[@]}"; do ARGS+=(--image "$input_path"); done
-ARGS+=(--prompt "$PROMPT_FILE" --gpu "${COLAB_GPU:-A100}" --timeout "$EXEC_TIMEOUT")
+ARGS+=(--prompt "$PROMPT_FILE" --mode "$INFERENCE_MODE" --width "$WIDTH" --height "$HEIGHT" --gpu "${COLAB_GPU:-A100}" --timeout "$EXEC_TIMEOUT")
 if [[ -n "$OUTPUT_TARGET" ]]; then ARGS+=(--output "$OUTPUT_TARGET"); fi
 if (( ! HIGH_MEM )); then ARGS+=(--no-high-mem); fi
 

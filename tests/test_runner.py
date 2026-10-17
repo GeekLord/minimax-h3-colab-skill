@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -47,7 +50,12 @@ elif command == "exec":
     envs = [args[i + 1] for i, value in enumerate(args[:-1]) if value == "--env"]
     values = dict(item.split("=", 1) for item in envs)
     output = values["H3_OUTPUT_PATH"]
-    record("exec", output=output, refs=json.loads(values["H3_REFERENCE_IMAGES"]), prompt=values["H3_PROMPT_FILE"])
+    record(
+        "exec", output=output, mode=values["H3_INFERENCE_MODE"],
+        refs=json.loads(values["H3_REFERENCE_IMAGES"]) if "H3_REFERENCE_IMAGES" in values else [],
+        input_image=values.get("H3_INPUT_IMAGE"), prompt=values["H3_PROMPT_FILE"],
+        width=values.get("H3_WIDTH"), height=values.get("H3_HEIGHT"),
+    )
     if values.get("H3_OUTPUT_PREFIX") == os.environ.get("FAKE_FAIL_PREFIX"):
         print("simulated inference failure", file=sys.stderr)
         sys.exit(7)
@@ -172,6 +180,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sum(call["command"] == "new" for call in calls), 1)
         self.assertEqual(sum(call["command"] == "exec" for call in calls), 2)
         self.assertEqual(sum(call["command"] == "stop" for call in calls), 1)
+        exec_calls = [call for call in calls if call["command"] == "exec"]
+        self.assertTrue(all(call["mode"] == "reference" for call in exec_calls))
+        self.assertTrue(all(call["width"] == "1344" and call["height"] == "768" for call in exec_calls))
         uploads = [call for call in calls if call["command"] == "upload"]
         self.assertEqual(len({call["remote"] for call in uploads}), 4)
 
@@ -213,6 +224,26 @@ class RunnerTests(unittest.TestCase):
         uploaded_prompt = self.state_dir / "remote" / str(exec_call["prompt"]).lstrip("/")
         self.assertEqual(uploaded_prompt.read_text(encoding="utf-8"), prompt_content)
 
+    def test_shell_launcher_passes_first_frame_mode_and_dimensions(self) -> None:
+        image = self.root / "first-frame.png"
+        prompt = self.root / "prompt.txt"
+        image.write_bytes(b"fake png bytes")
+        prompt.write_text("A concise motion prompt.\n", encoding="utf-8")
+        project = Path(__file__).resolve().parents[1]
+        subprocess.run([
+            str(project / "run_colab_inference.sh"),
+            "--image", str(image), "--prompt", str(prompt),
+            "--mode", "first_frame", "--width", "512", "--height", "512",
+        ], env=os.environ.copy(), capture_output=True, text=True, check=True, timeout=30)
+        exec_call = next(call for call in self.calls() if call["command"] == "exec")
+        reference_upload = next(
+            call for call in self.calls()
+            if call["command"] == "upload" and call["remote"].endswith("_reference_1.img")
+        )
+        self.assertEqual(exec_call["mode"], "first_frame")
+        self.assertEqual(exec_call["input_image"], reference_upload["remote"])
+        self.assertEqual((exec_call["width"], exec_call["height"]), ("512", "512"))
+
     def test_resolve_jobs_rejects_duplicate_job_ids_and_outputs(self) -> None:
         manifest = self.manifest(2)
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -232,6 +263,95 @@ class RunnerTests(unittest.TestCase):
         manifest.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "Picture"):
             runner.resolve_jobs(data, self.root / "output")
+
+    def test_first_frame_mode_sets_single_image_and_output_dimensions(self) -> None:
+        manifest = self.manifest(1)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["jobs"][0].update({"inference_mode": "first_frame", "width": 512, "height": 512})
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+
+        result = runner.run_batch(
+            manifest, session=None, gpu="A100", high_mem=False, stop_on_complete=False,
+            progress_path=None, output_dir=self.root / "outputs", exec_timeout=100,
+        )
+
+        self.assertEqual(result["status"], "completed")
+        exec_call = next(call for call in self.calls() if call["command"] == "exec")
+        self.assertEqual(exec_call["mode"], "first_frame")
+        self.assertEqual(exec_call["refs"], [])
+        self.assertEqual(exec_call["input_image"], "/content/h3_job-0_reference_1.img")
+        self.assertEqual((exec_call["width"], exec_call["height"]), ("512", "512"))
+
+    def test_resolve_jobs_validates_mode_reference_count_and_dimensions(self) -> None:
+        manifest = self.manifest(2)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        resolved = runner.resolve_jobs(data, self.root / "output")
+        self.assertEqual(resolved[0]["inference_mode"], "reference")
+        self.assertEqual((resolved[0]["width"], resolved[0]["height"]), (1344, 768))
+
+        data["jobs"][0]["inference_mode"] = "first_frame"
+        data["jobs"][0]["reference_images"].append(data["jobs"][0]["reference_images"][0])
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            runner.resolve_jobs(data, self.root / "output")
+
+        data["jobs"][0]["reference_images"].pop()
+        data["jobs"][0].update({"width": 1376, "height": 768})
+        with self.assertRaisesRegex(ValueError, "may not exceed"):
+            runner.resolve_jobs(data, self.root / "output")
+        data["jobs"][0].update({"width": 513, "height": 512})
+        with self.assertRaisesRegex(ValueError, "divisible by 32"):
+            runner.resolve_jobs(data, self.root / "output")
+
+    def test_notebook_code_compiles_and_applies_dimension_environment_and_limits(self) -> None:
+        notebook_path = Path(__file__).resolve().parents[1] / "assets" / "MiniMax_H3_Turbo_Colab.ipynb"
+        notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+        code_sources = [
+            (index, "".join(cell.get("source", [])))
+            for index, cell in enumerate(notebook["cells"])
+            if cell.get("cell_type") == "code"
+        ]
+        for index, source in code_sources:
+            compile(source, f"{notebook_path}#cell-{index}", "exec")
+
+        config = None
+        for index, source in code_sources:
+            tree = ast.parse(source)
+            assigned = {
+                target.id
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                if isinstance(target, ast.Name)
+            }
+            assertion_names = {
+                name.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assert)
+                for name in ast.walk(node.test)
+                if isinstance(name, ast.Name)
+            }
+            if {"WIDTH", "HEIGHT"} <= assigned and {"WIDTH", "HEIGHT"} <= assertion_names:
+                config = (index, source)
+                break
+        self.assertIsNotNone(config, "Could not find the Notebook cell that assigns and validates output dimensions.")
+        cell_index, config_source = config
+
+        def execute_config(width: str, height: str) -> dict[str, object]:
+            namespace: dict[str, object] = {"os": os, "INFERENCE_MODE": "first_frame"}
+            with patch.dict(os.environ, {
+                "H3_WIDTH": width,
+                "H3_HEIGHT": height,
+                "H3_DURATION_SECONDS": "5",
+                "H3_SEED": "123",
+            }), contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(config_source, f"{notebook_path}#cell-{cell_index}", "exec"), namespace)
+            return namespace
+
+        valid = execute_config("512", "512")
+        self.assertEqual((valid["WIDTH"], valid["HEIGHT"]), (512, 512))
+        for width, height in (("1376", "768"), ("513", "512")):
+            with self.subTest(width=width, height=height), self.assertRaises(AssertionError):
+                execute_config(width, height)
 
 
 if __name__ == "__main__":
